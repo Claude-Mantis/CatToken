@@ -1,12 +1,3 @@
-// Improved LuckyPandaLockup Contract
-// Fixes:
-// - Removed invalid "Int as uint256" for local variables (totalAmount, totalRemoveAmount, totalClaimableAmount).
-// - Used plain "Int" for local accumulators, relying on require checks for non-negative values.
-// - Kept "Int as uint256" for storage maps and struct fields where valid.
-// - Maintained previous fixes: lockupInfo and pendingBatchLockups use Slice keys, no ?: operator, null safety, etc.
-// - Removed unused RemoveLockupEvent.
-// - Ensured Tact compliance and type consistency.
-
 import "@stdlib/deploy";
 import "@stdlib/ownable";
 
