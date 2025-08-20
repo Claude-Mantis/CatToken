@@ -124,7 +124,7 @@ contract YcatLockup with Deployable, Ownable {
     jettonWallet: Address;  // Contract's Jetton wallet address
     
     // Storage maps
-    lockupInfo: map<Slice, LockupUser>; // Key: serialize(account, lockupIndex)
+    lockupInfo: map<Int, LockupUser>; // Key: hash(account, lockupIndex)
     lockupCounts: map<Address, Int>;
     allowList: map<Address, Bool>;
     
@@ -134,7 +134,7 @@ contract YcatLockup with Deployable, Ownable {
     
     // Pending operations
     pendingSetLockups: map<Int, LockupData>;
-    pendingBatchLockups: map<Slice, LockupData>; // Key: serialize(queryId, batchIndex)
+    pendingBatchLockups: map<Int, LockupData>; // Key: hash(queryId, batchIndex)
     pendingBatchExpectedAmounts: map<Int, Int as uint256>;
     pendingBatchCounts: map<Int, Int>; // queryId -> number of batch entries
     nextQueryId: Int as uint64;
@@ -150,15 +150,13 @@ contract YcatLockup with Deployable, Ownable {
     }
     
     // Helper to create lockup key
-    fun createLockupKey(account: Address, index: Int): Slice {
-        let cell: Cell = beginCell().storeAddress(account).storeUint(index, 32).endCell();
-        return cell.beginParse();
+    fun createLockupKey(account: Address, index: Int): Int {
+        return account.asSlice().hash() + index;
     }
     
     // Helper to create batch lockup key
-    fun createBatchLockupKey(queryId: Int, index: Int): Slice {
-        let cell: Cell = beginCell().storeUint(queryId, 64).storeUint(index, 32).endCell();
-        return cell.beginParse();
+    fun createBatchLockupKey(queryId: Int, index: Int): Int {
+        return queryId * 1000000 + index;
     }
     
     // Require not in critical section
@@ -170,7 +168,7 @@ contract YcatLockup with Deployable, Ownable {
     fun requireAuthorized(sender: Address) {
         let isOwner: Bool = sender == self.owner;
         let allowListValue: Bool? = self.allowList.get(sender);
-        let isAllowed: Bool = allowListValue.getOrDefault(false);
+        let isAllowed: Bool = allowListValue != null ? allowListValue!! : false;
         require(isOwner || isAllowed, "LuckyPandaLockup: caller is not authorized");
     }
     
@@ -205,10 +203,11 @@ contract YcatLockup with Deployable, Ownable {
         if (expectedAmount != null) {
             require(msg.amount >= expectedAmount!!, "LuckyPandaLockup: insufficient jetton amount for batch");
             
-            let batchCount: Int = self.pendingBatchCounts.get(msg.query_id).getOrDefault(0);
+            let batchCountOpt: Int? = self.pendingBatchCounts.get(msg.query_id);
+            let batchCount: Int = batchCountOpt != null ? batchCountOpt!! : 0;
             let i: Int = 0;
             while (i < batchCount) {
-                let key: Slice = self.createBatchLockupKey(msg.query_id, i);
+                let key: Int = self.createBatchLockupKey(msg.query_id, i);
                 let lockupData: LockupData? = self.pendingBatchLockups.get(key);
                 if (lockupData != null) {
                     self.setLockupInternal(lockupData!!.account, lockupData!!.amount, lockupData!!.edTimestamp);
@@ -284,7 +283,7 @@ contract YcatLockup with Deployable, Ownable {
             require(amount != null && amount!! > 0, "LuckyPandaLockup: invalid amount in batch");
             require(edTimestamp != null && edTimestamp!! > now(), "LuckyPandaLockup: invalid timestamp in batch");
             
-            let key: Slice = self.createBatchLockupKey(self.nextQueryId, i);
+            let key: Int = self.createBatchLockupKey(self.nextQueryId, i);
             self.pendingBatchLockups.set(key, LockupData{
                 account: account!!,
                 amount: amount!!,
@@ -329,7 +328,7 @@ contract YcatLockup with Deployable, Ownable {
         
         require(self.checkLockupInfoExist(senderAddr, msg.lockupIndex), "LuckyPandaLockup: lockup does not exist");
         
-        let key: Slice = self.createLockupKey(senderAddr, msg.lockupIndex);
+        let key: Int = self.createLockupKey(senderAddr, msg.lockupIndex);
         let lockupValue: LockupUser? = self.lockupInfo.get(key);
         require(lockupValue != null, "LuckyPandaLockup: lockup not found");
         let lockup: LockupUser = lockupValue!!;
@@ -343,8 +342,10 @@ contract YcatLockup with Deployable, Ownable {
         self.lockupInfo.set(key, lockup);
         
         // Update cached totals
-        let currAllocated: Int as uint256 = self.totalAllocated.get(senderAddr).getOrDefault(0);
-        let currClaimed: Int as uint256 = self.totalClaimed.get(senderAddr).getOrDefault(0);
+        let currAllocatedOpt: Int? = self.totalAllocated.get(senderAddr);
+        let currAllocated: Int = currAllocatedOpt != null ? currAllocatedOpt!! : 0;
+        let currClaimedOpt: Int? = self.totalClaimed.get(senderAddr);
+        let currClaimed: Int = currClaimedOpt != null ? currClaimedOpt!! : 0;
         self.totalAllocated.set(senderAddr, currAllocated - lockup.amount);
         self.totalClaimed.set(senderAddr, currClaimed + lockup.amount);
         
@@ -388,13 +389,15 @@ contract YcatLockup with Deployable, Ownable {
         require(self.checkLockupInfoExist(msg.account, 0), "LuckyPandaLockup: no lockup info for account");
         
         let totalRemoveAmount: Int = 0;
-        let lockupCount: Int = self.lockupCounts.get(msg.account).getOrDefault(0);
+        let lockupCountOpt: Int? = self.lockupCounts.get(msg.account);
+        let lockupCount: Int = lockupCountOpt != null ? lockupCountOpt!! : 0;
         require(lockupCount <= 50, "LuckyPandaLockup: too many lockups; process in batches");
         
         let removedIndices: map<Int, Int> = emptyMap();
+        let removedCount: Int = 0;
         let i: Int = 0;
         while (i < lockupCount) {
-            let key: Slice = self.createLockupKey(msg.account, i);
+            let key: Int = self.createLockupKey(msg.account, i);
             let lockupValue: LockupUser? = self.lockupInfo.get(key);
             if (lockupValue != null) {
                 let lockupData: LockupUser = lockupValue!!;
@@ -403,17 +406,19 @@ contract YcatLockup with Deployable, Ownable {
                     self.lockupInfo.set(key, lockupData);
                     totalRemoveAmount = totalRemoveAmount + lockupData.amount;
                     removedIndices.set(i, lockupData.amount);
+                    removedCount = removedCount + 1;
                 }
             }
             i = i + 1;
         }
         
         // Update cached totals
-        let currAllocated: Int as uint256 = self.totalAllocated.get(msg.account).getOrDefault(0);
+        let currAllocatedOpt: Int? = self.totalAllocated.get(msg.account);
+        let currAllocated: Int = currAllocatedOpt != null ? currAllocatedOpt!! : 0;
         self.totalAllocated.set(msg.account, currAllocated - totalRemoveAmount);
         
         // Emit batch event
-        if (removedIndices.size() > 0) {
+        if (removedCount > 0) {
             emit(RemoveLockupBatchEvent{
                 account: msg.account,
                 lockupIndices: removedIndices,
@@ -468,10 +473,11 @@ contract YcatLockup with Deployable, Ownable {
     // Clear specific pending operation
     receive(msg: ClearPending) {
         self.requireOwner();
-        let batchCount: Int = self.pendingBatchCounts.get(msg.queryId).getOrDefault(0);
+        let batchCountOpt: Int? = self.pendingBatchCounts.get(msg.queryId);
+        let batchCount: Int = batchCountOpt != null ? batchCountOpt!! : 0;
         let i: Int = 0;
         while (i < batchCount) {
-            let key: Slice = self.createBatchLockupKey(msg.queryId, i);
+            let key: Int = self.createBatchLockupKey(msg.queryId, i);
             self.pendingBatchLockups.set(key, null);
             i = i + 1;
         }
@@ -481,13 +487,14 @@ contract YcatLockup with Deployable, Ownable {
     }
     
     // Internal set lockup
-    fun setLockupInternal(account: Address, amount: Int as uint256, edTimestamp: Int) {
+    fun setLockupInternal(account: Address, amount: Int, edTimestamp: Int) {
         let currentTimestamp: Int = now();
         
         require(account != newAddress(0, 0), "LuckyPandaLockup: invalid account address");
         require(amount > 0, "LuckyPandaLockup: lockup amount must be greater than zero");
         
-        let currentCount: Int = self.lockupCounts.get(account).getOrDefault(0);
+        let currentCountOpt: Int? = self.lockupCounts.get(account);
+        let currentCount: Int = currentCountOpt != null ? currentCountOpt!! : 0;
         
         let newLockup: LockupUser = LockupUser{
             amount: amount,
@@ -497,12 +504,13 @@ contract YcatLockup with Deployable, Ownable {
             isRemoved: false
         };
         
-        let key: Slice = self.createLockupKey(account, currentCount);
+        let key: Int = self.createLockupKey(account, currentCount);
         self.lockupInfo.set(key, newLockup);
         self.lockupCounts.set(account, currentCount + 1);
         
         // Update cached total allocated
-        let currAllocated: Int as uint256 = self.totalAllocated.get(account).getOrDefault(0);
+        let currAllocatedOpt: Int? = self.totalAllocated.get(account);
+        let currAllocated: Int = currAllocatedOpt != null ? currAllocatedOpt!! : 0;
         self.totalAllocated.set(account, currAllocated + amount);
         
         emit(SetLockupEvent{
@@ -516,11 +524,12 @@ contract YcatLockup with Deployable, Ownable {
     
     // Check if lockup exists
     fun checkLockupInfoExist(account: Address, lockupIndex: Int): Bool {
-        let lockupCount: Int = self.lockupCounts.get(account).getOrDefault(0);
+        let lockupCountOpt: Int? = self.lockupCounts.get(account);
+        let lockupCount: Int = lockupCountOpt != null ? lockupCountOpt!! : 0;
         if (lockupCount == 0 || lockupIndex >= lockupCount) {
             return false;
         }
-        let key: Slice = self.createLockupKey(account, lockupIndex);
+        let key: Int = self.createLockupKey(account, lockupIndex);
         return self.lockupInfo.get(key) != null;
     }
     
@@ -529,34 +538,38 @@ contract YcatLockup with Deployable, Ownable {
         if (!self.checkLockupInfoExist(account, lockupIndex)) {
             return null;
         }
-        let key: Slice = self.createLockupKey(account, lockupIndex);
+        let key: Int = self.createLockupKey(account, lockupIndex);
         return self.lockupInfo.get(key);
     }
     
     // Get lockup count
     get fun getLockupCount(account: Address): Int {
-        return self.lockupCounts.get(account).getOrDefault(0);
+        let countOpt: Int? = self.lockupCounts.get(account);
+        return countOpt != null ? countOpt!! : 0;
     }
     
     // Get total allocation (using cache)
-    get fun getTotalAllocation(account: Address): Int as uint256 {
-        return self.totalAllocated.get(account).getOrDefault(0);
+    get fun getTotalAllocation(account: Address): Int {
+        let allocatedOpt: Int? = self.totalAllocated.get(account);
+        return allocatedOpt != null ? allocatedOpt!! : 0;
     }
     
     // Get total claimed (using cache)
-    get fun getTotalClaimed(account: Address): Int as uint256 {
-        return self.totalClaimed.get(account).getOrDefault(0);
+    get fun getTotalClaimed(account: Address): Int {
+        let claimedOpt: Int? = self.totalClaimed.get(account);
+        return claimedOpt != null ? claimedOpt!! : 0;
     }
     
     // Get total claimable (compute on the fly)
     get fun getTotalClaimable(account: Address): Int {
-        let lockupCount: Int = self.lockupCounts.get(account).getOrDefault(0);
+        let lockupCountOpt: Int? = self.lockupCounts.get(account);
+        let lockupCount: Int = lockupCountOpt != null ? lockupCountOpt!! : 0;
         let totalClaimableAmount: Int = 0;
         let currentTime: Int = now();
         
         let i: Int = 0;
         while (i < lockupCount) {
-            let key: Slice = self.createLockupKey(account, i);
+            let key: Int = self.createLockupKey(account, i);
             let lockup: LockupUser? = self.lockupInfo.get(key);
             if (lockup != null) {
                 let lockupData: LockupUser = lockup!!;
@@ -572,7 +585,8 @@ contract YcatLockup with Deployable, Ownable {
     
     // Check if allowed
     get fun isAllowed(account: Address): Bool {
-        return self.allowList.get(account).getOrDefault(false);
+        let allowedOpt: Bool? = self.allowList.get(account);
+        return allowedOpt != null ? allowedOpt!! : false;
     }
     
     // Get Jetton wallet
