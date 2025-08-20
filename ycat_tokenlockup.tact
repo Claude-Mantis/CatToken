@@ -128,7 +128,7 @@ message JettonReceivedEvent {
     queryId: Int as uint64;
 }
 
-contract LuckyPandaLockup with Deployable, Ownable {
+contract YcatLockup with Deployable, Ownable {
     owner: Address;
     jettonWallet: Address;  // Contract's Jetton wallet address
     
